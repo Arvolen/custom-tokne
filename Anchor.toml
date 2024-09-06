@@ -4,14 +4,14 @@
 seeds = false
 skip-lint = false
 
-[programs.devnet]
-custom_token = "9EQj1fWttG6tLmGnyZShJFWpBGmQd1FHFTzjTYHYsGSK"
+[programs.localnet]
+token_minter = "AC6154m8duyj6p2vgwyCNViuAcQYZyfupdxKFRDnHEMZ"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-cluster = "devnet"
+cluster = "localnet"
 wallet = "/home/arlen/.config/solana/id.json"
 
 [scripts]

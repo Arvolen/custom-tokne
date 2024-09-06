@@ -1,141 +1,284 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
-import { TokenMinter } from "../target/types/token_minter";
+import { TokenMinter  as  AnchorTokenMetadata } from "../target/types/token_minter";
 import {
-  Connection,
-  PublicKey,
-  Signer,
+  Keypair,
   SystemProgram,
-  TransactionSignature,
-  TransactionConfirmationStatus,
-  SignatureStatus,
-  SYSVAR_RENT_PUBKEY,
+  Transaction,
+  sendAndConfirmTransaction,
+  PublicKey,
 } from "@solana/web3.js";
-import { assert } from "chai";
+import {
+  ExtensionType,
+  TOKEN_2022_PROGRAM_ID,
+  createInitializeMintInstruction,
+  getMintLen,
+  createInitializeMetadataPointerInstruction,
+  getMint,
+  getMetadataPointerState,
+} from "@solana/spl-token";
+import {
+  createInitializeInstruction,
+  unpack,
+  pack,
+  TokenMetadata,
+  createUpdateFieldInstruction,
+} from "@solana/spl-token-metadata";
 
 describe("token_minter", () => {
-  const getProvider = () => anchor.AnchorProvider.env();
-  const provider = getProvider();
-  anchor.setProvider(provider);
-
-  const program = anchor.workspace.TokenMinter as Program<TokenMinter>;
-
-  let mint: Signer;
-
-  // Metaplex Constants
-  const METADATA_SEED = "metadata";
-  const TOKEN_METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
-
-  // Constants from our program
-  const MINT_SEED = "mint";
-
-  // Test data
-  const payer = provider.wallet.publicKey;
-  const metadata = {
-    name: "Just a Test Token",
-    symbol: "TEST",
-    uri: "https://5vfxc4tr6xoy23qefqbj4qx2adzkzapneebanhcalf7myvn5gzja.arweave.net/7UtxcnH13Y1uBCwCnkL6APKsge0hAgacQFl-zFW9NlI",
-    decimals: 9,
-  };
-
-  const [mintPublicKey, mintBump] = PublicKey.findProgramAddressSync(
-    [Buffer.from(MINT_SEED)],
-    program.programId
-  );
-
-  const [metadataAddress] = PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(METADATA_SEED),
-      TOKEN_METADATA_PROGRAM_ID.toBuffer(),
-      mintPublicKey.toBuffer(),
-    ],
-    TOKEN_METADATA_PROGRAM_ID
-  );
-
-  // Helper function to confirm transactions
-  async function confirmTransaction(
-    connection: Connection,
-    signature: TransactionSignature,
-    desiredConfirmationStatus: TransactionConfirmationStatus = "confirmed",
-    timeout: number = 30000,
-    pollInterval: number = 1000,
-    searchTransactionHistory: boolean = false
-  ): Promise<SignatureStatus> {
-    const start = Date.now();
-
-    while (Date.now() - start < timeout) {
-      const { value: statuses } = await connection.getSignatureStatuses([signature], { searchTransactionHistory });
-
-      if (!statuses || statuses.length === 0) {
-        throw new Error("Failed to get signature status");
-      }
-
-      const status = statuses[0];
-
-      if (status === null) {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
-        continue;
-      }
-
-      if (status.err) {
-        throw new Error(`Transaction failed: ${JSON.stringify(status.err)}`);
-      }
-
-      if (status.confirmationStatus && status.confirmationStatus === desiredConfirmationStatus) {
-        return status;
-      }
-
-      if (status.confirmationStatus === "finalized") {
-        return status;
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, pollInterval));
-    }
-
-    throw new Error(`Transaction confirmation timeout after ${timeout}ms`);
-  }
-
-  it("initialize", async () => {
+    // Configure the client to use the local cluster.
+    const provider = anchor.AnchorProvider.env();
+    anchor.setProvider(provider);
+  
+    const program = anchor.workspace
+      .TokenMinter as Program<AnchorTokenMetadata>;
+    const wallet = provider.wallet as anchor.Wallet;
     const connection = provider.connection;
-
-    // Initialize mint if it doesn't exist
-    const info = await connection.getAccountInfo(mintPublicKey);
-    if (info) {
-      console.log("  Mint already initialized.");
-      return;
-    }
-
-    console.log("  Mint not found. Initializing...");
-
-    // Define transaction context
-    const context = {
-      metadata: metadataAddress,
+  
+    // Generate a new mint keypair
+    const mintKeypair = Keypair.generate();
+    const mintPublicKey = mintKeypair.publicKey;
+    const decimals = 9;
+  
+    // Find the Program Derived Address (PDA) for metadata
+    const [metadataPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("metadata"), mintPublicKey.toBuffer()],
+      program.programId
+    );
+  
+    // Define token metadata
+    const metaData: TokenMetadata = {
+      updateAuthority: wallet.publicKey,
       mint: mintPublicKey,
-      payer: provider.wallet.publicKey, // Use provider wallet as payer
-      rent: SYSVAR_RENT_PUBKEY,
-      systemProgram: SystemProgram.programId,
-      tokenProgram: anchor.utils.token.TOKEN_PROGRAM_ID, // Correct program ID
-      tokenMetadataProgram: TOKEN_METADATA_PROGRAM_ID,
+      name: "name",
+      symbol: "symbol",
+      uri: "uri",
+      additionalMetadata: [
+        ["key1", "value1"],
+        ["key1", ""], // Remove value
+      ],
     };
-
-    console.log("Context:", context);
-
-    try {
-      const txHash = await program.methods
-        .initToken(metadata)
-        .accounts(context)
-        .rpc();
-
-      console.log("Transaction sent. Awaiting confirmation...");
-      
-      await confirmTransaction(connection, txHash, "finalized");
-
-      console.log(`Transaction confirmed: https://explorer.solana.com/tx/${txHash}?cluster=devnet`);
-
-      const newInfo = await connection.getAccountInfo(mintPublicKey);
-      assert(newInfo, "Mint should be initialized.");
-    } catch (error) {
-      console.error("Error during transaction:", error);
-    }
+  
+    it("Is initialized!", async () => {
+      // Calculate size and lamports required for mint account
+      const mintLen = getMintLen([ExtensionType.MetadataPointer]);
+      const lamports = await connection.getMinimumBalanceForRentExemption(
+        mintLen
+      );
+  
+      // Create account and initialize instructions
+      const createAccountInstruction = SystemProgram.createAccount({
+        fromPubkey: wallet.publicKey,
+        newAccountPubkey: mintPublicKey,
+        space: mintLen,
+        lamports,
+        programId: TOKEN_2022_PROGRAM_ID,
+      });
+  
+      // Enable MetadataPointer extension on mint account
+      const initializeMetadataPointerInstruction =
+        createInitializeMetadataPointerInstruction(
+          mintPublicKey,
+          wallet.publicKey, // Pointer update authority
+          metadataPDA,
+          TOKEN_2022_PROGRAM_ID
+        );
+  
+      // Initialize mint account data
+      const initializeMintInstruction = createInitializeMintInstruction(
+        mintPublicKey,
+        decimals,
+        wallet.publicKey, // Mint authority
+        null, // Freeze authority
+        TOKEN_2022_PROGRAM_ID
+      );
+  
+      // Create and initialize metadata account using our custom metadata program
+      const initializeMetadataInstruction = createInitializeInstruction({
+        programId: program.programId,
+        metadata: metadataPDA,
+        updateAuthority: metaData.updateAuthority,
+        mint: mintPublicKey,
+        mintAuthority: wallet.publicKey,
+        name: metaData.name,
+        symbol: metaData.symbol,
+        uri: metaData.uri,
+      });
+  
+      // Additional accounts required by our instruction
+      // Used to create the metadata account via CPI in the program instruction
+      initializeMetadataInstruction.keys.push(
+        { isSigner: true, isWritable: true, pubkey: wallet.publicKey },
+        { isSigner: false, isWritable: false, pubkey: SystemProgram.programId }
+      );
+  
+      const transaction = new Transaction().add(
+        createAccountInstruction,
+        initializeMetadataPointerInstruction,
+        initializeMintInstruction,
+        initializeMetadataInstruction
+      );
+  
+      const transactionSignature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [wallet.payer, mintKeypair],
+        { skipPreflight: true, commitment: "confirmed" }
+      );
+  
+      console.log(
+        "\nCreate Mint Account:",
+        `https://solana.fm/tx/${transactionSignature}?cluster=devnet-solana`
+      );
+  
+      // Check mint account metadata pointer matches the PDA
+      const mintInfo = await getMint(
+        connection,
+        mintPublicKey,
+        "confirmed",
+        TOKEN_2022_PROGRAM_ID
+      );
+      const metadataPointer = getMetadataPointerState(mintInfo);
+      console.log(
+        "\nMetadata Pointer:",
+        JSON.stringify(metadataPointer, null, 2)
+      );
+      console.log("\nMetadata PDA:", metadataPDA.toString());
+  
+      // Check metadata account data updated correctly
+      const metadataAccount = await connection.getAccountInfo(metadataPDA);
+      // Metadata starts with offset of 12 bytes
+      // 8 byte discriminator + 4 byte extra offset? (not sure)
+      let unpackedData = unpack(metadataAccount.data.subarray(12));
+      console.log("\nMetadata:", JSON.stringify(unpackedData, null, 2));
+  
+      // const validIndex = findValidUnpackIndex(metadataAccount.data);
+    });
+  
+    it("Update Field, add data", async () => {
+      const updateFieldInstruction = createUpdateFieldInstruction({
+        programId: program.programId, // custom metadata program
+        metadata: metadataPDA, // use mint as metadata address
+        updateAuthority: metaData.updateAuthority,
+        field: metaData.additionalMetadata[0][0],
+        value: metaData.additionalMetadata[0][1],
+      });
+      // Additional accounts required by our instruction
+      // Used to create the metadata account via CPI in the program instruction
+      updateFieldInstruction.keys.push(
+        { isSigner: false, isWritable: false, pubkey: mintPublicKey },
+        { isSigner: true, isWritable: true, pubkey: wallet.publicKey },
+        { isSigner: false, isWritable: false, pubkey: SystemProgram.programId }
+      );
+  
+      const transaction = new Transaction().add(updateFieldInstruction);
+  
+      const transactionSignature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [wallet.payer],
+        { skipPreflight: true, commitment: "confirmed" }
+      );
+  
+      console.log(
+        "\nCreate Mint Account:",
+        `https://solana.fm/tx/${transactionSignature}?cluster=devnet-solana`
+      );
+  
+      // Check mint account metadata pointer matches the PDA
+      const mintInfo = await getMint(
+        connection,
+        mintPublicKey,
+        "confirmed",
+        TOKEN_2022_PROGRAM_ID
+      );
+      const metadataPointer = getMetadataPointerState(mintInfo);
+      console.log(
+        "\nMetadata Pointer:",
+        JSON.stringify(metadataPointer, null, 2)
+      );
+      console.log("\nMetadata PDA:", metadataPDA.toString());
+  
+      // Check metadata account data updated correctly
+      const metadataAccount = await connection.getAccountInfo(metadataPDA);
+      // Metadata starts with offset of 12 bytes
+      // 8 byte discriminator + 4 byte extra offset? (not sure)
+      let unpackedData = unpack(metadataAccount.data.subarray(12));
+      console.log("\nMetadata:", JSON.stringify(unpackedData, null, 2));
+  
+      // const validIndex = findValidUnpackIndex(metadataAccount.data);
+    });
+  
+    it("Update Field, reduce data", async () => {
+      const updateFieldInstruction = createUpdateFieldInstruction({
+        programId: program.programId, // custom metadata program
+        metadata: metadataPDA, // use mint as metadata address
+        updateAuthority: metaData.updateAuthority,
+        field: metaData.additionalMetadata[0][0],
+        value: metaData.additionalMetadata[1][1],
+      });
+      // Additional accounts required by our instruction
+      // Used to create the metadata account via CPI in the program instruction
+      updateFieldInstruction.keys.push(
+        { isSigner: false, isWritable: false, pubkey: mintPublicKey },
+        { isSigner: true, isWritable: true, pubkey: wallet.publicKey },
+        { isSigner: false, isWritable: false, pubkey: SystemProgram.programId }
+      );
+  
+      const transaction = new Transaction().add(updateFieldInstruction);
+  
+      const transactionSignature = await sendAndConfirmTransaction(
+        connection,
+        transaction,
+        [wallet.payer],
+        { skipPreflight: true, commitment: "confirmed" }
+      );
+  
+      console.log(
+        "\nCreate Mint Account:",
+        `https://solana.fm/tx/${transactionSignature}?cluster=devnet-solana`
+      );
+  
+      // Check mint account metadata pointer matches the PDA
+      const mintInfo = await getMint(
+        connection,
+        mintPublicKey,
+        "confirmed",
+        TOKEN_2022_PROGRAM_ID
+      );
+      const metadataPointer = getMetadataPointerState(mintInfo);
+      console.log(
+        "\nMetadata Pointer:",
+        JSON.stringify(metadataPointer, null, 2)
+      );
+      console.log("\nMetadata PDA:", metadataPDA.toString());
+  
+      // Check metadata account data updated correctly
+      const metadataAccount = await connection.getAccountInfo(metadataPDA);
+      // Metadata starts with offset of 12 bytes
+      // 8 byte discriminator + 4 byte extra offset? (not sure)
+      let unpackedData = unpack(metadataAccount.data.subarray(12));
+      console.log("\nMetadata:", JSON.stringify(unpackedData, null, 2));
+  
+      // const validIndex = findValidUnpackIndex(metadataAccount.data);
+    });
   });
-});
+  
+  function findValidUnpackIndex(tlvData) {
+    for (let i = 0; i < tlvData.length; i++) {
+      try {
+        // Try to unpack starting from index 'i'
+        const metadata = unpack(tlvData.slice(i));
+  
+        // If unpacking is successful, log the metadata and return the index
+        console.log("Successful unpack at index:", i);
+        console.log("Metadata:", JSON.stringify(metadata, null, 2));
+        return i;
+      } catch (error) {
+        // If an error occurs, continue to the next index
+        // console.log("Unpack failed at index:", i, "Error:", error.message);
+      }
+    }
+    // If no successful unpacking, return an indication
+    return -1;
+  }

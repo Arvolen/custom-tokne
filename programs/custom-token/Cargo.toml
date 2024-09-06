@@ -1,12 +1,12 @@
 [package]
-name = "custom-token"
+name = "token_minter"
 version = "0.1.0"
 description = "Created with Anchor"
 edition = "2021"
 
 [lib]
 crate-type = ["cdylib", "lib"]
-name = "custom_token"
+name = "token_minter"
 
 [features]
 no-entrypoint = []
@@ -17,6 +17,10 @@ default = []
 
 [dependencies]
 spl-token =	"4.0.0"
-solana-program = "1.16.16"
 anchor-lang = "0.29.0"
 anchor-spl = {version = "0.29.0", features = ["metadata"]}
+solana-program = "1.16.16"
+spl-token-2022 = "0.9.0"
+spl-token-metadata-interface = "0.2.0"
+spl-type-length-value = "0.3.0"
+spl-pod = "0.1.0"
